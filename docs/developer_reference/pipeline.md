@@ -134,6 +134,13 @@ that call. Sessions outside the failed call continue.
 - `stream_chunk`: accumulate and decode code chunks
 - `stream_done`: flush remaining audio and emit a final result
 
+Vocoder implementations using `StreamingVocoderBase` ignore late completion
+messages for retained completed or aborted request IDs, just as they ignore late
+chunks. Such messages must not queue a completion for a later request reusing
+the ID. Completion before the first payload is still buffered for a live request.
+The retained-ID history is bounded; this is not an acknowledgement that an
+autoregressive stage has already reclaimed its in-flight work or KV allocation.
+
 ### Model Runner
 
 The model runner layer owns the AR forward path. The design target is:

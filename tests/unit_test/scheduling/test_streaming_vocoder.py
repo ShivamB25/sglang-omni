@@ -370,6 +370,31 @@ def test_stream_done_before_payload_is_buffered() -> None:
     assert "r" not in scheduler.pending_done
 
 
+@pytest.mark.parametrize("abort_first", [False, True])
+def test_late_done_cannot_complete_reused_request(abort_first: bool) -> None:
+    scheduler = FakeStreamingVocoder(threshold=10)
+    scheduler.handle_streaming_new_request("r", make_payload())
+    scheduler.handle_stream_chunk("r", item([1, 2]))
+    if abort_first:
+        scheduler.abort("r")
+    else:
+        scheduler.handle_stream_done("r")
+    drain(scheduler)
+
+    scheduler.handle_stream_done("r")
+    scheduler.handle_stream_chunk("r", item([99]))
+    scheduler.handle_stream_done("r")
+    assert drain(scheduler) == []
+
+    scheduler.handle_streaming_new_request("r", make_payload())
+    assert drain(scheduler) == []
+    scheduler.handle_stream_chunk("r", item([7, 8]))
+    scheduler.handle_stream_done("r")
+    messages = drain(scheduler)
+    assert [message.type for message in messages] == ["stream", "result"]
+    np.testing.assert_array_equal(make_waveform(messages[0].data), [7.0, 8.0])
+
+
 def test_stream_done_before_payload_can_opt_in_to_early_tail() -> None:
     class EarlyTailVocoder(FakeStreamingVocoder):
         def on_stream_done_before_payload(self, request_id):

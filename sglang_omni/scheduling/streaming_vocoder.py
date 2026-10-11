@@ -272,6 +272,16 @@ class StreamingVocoderBase(
         item = self.validate_stream_chunk_item(request_id, item)
         self.on_stream_chunk_batch([(request_id, item)])
 
+    def handle_stream_done(self, request_id: str) -> None:
+        with self.state_lock:
+            if (
+                self.is_aborted(request_id)
+                or request_id in self.completed_stream_request_ids
+            ):
+                return
+            else:
+                super().handle_stream_done(request_id)
+
     def on_stream_done(self, request_id: str) -> list[OutgoingMessage] | None:
         return self.finish_stream(request_id)
 
