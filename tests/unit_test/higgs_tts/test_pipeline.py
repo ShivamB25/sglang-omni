@@ -84,24 +84,51 @@ def test_higgs_vocoder_rejects_compile_and_graph_domain_together() -> None:
         )
 
 
-def test_higgs_request_row_seed_tracks_request_seed() -> None:
+def test_higgs_request_row_reuse_resets_sampler_state_and_output_codes() -> None:
     model = object.__new__(HiggsTTSModel)
     model.rid_to_row = {}
     model.free_rows = [0]
-    model.sampler_pool = SimpleNamespace(
-        seeds=torch.full((1,), 7, dtype=torch.long),
-        reset_row=lambda row: None,
+    model.output_codes = {}
+    model.sampler_pool = HiggsBatchedSamplerState(
+        max_batch_size=1,
+        num_codebooks=3,
+        device="cpu",
     )
 
-    # Unseeded request: the row keeps the unseeded sentinel and stays on
-    # the true torch.multinomial path.
+    model.reset_request("request")
+    model.reset_request("request")
     model.set_request_seed("request", None)
-    assert model.rid_to_row == {"request": 0}
-    assert int(model.sampler_pool.seeds[0].item()) == NO_SEED
+    row = model.acquire_row("request")
+    assert row == 0
+    assert model.acquire_row("request") == row
+    assert int(model.sampler_pool.seeds[row].item()) == NO_SEED
+    model.set_request_seed("request", 17)
+    assert int(model.sampler_pool.seeds[row].item()) == 17
+    pool = model.sampler_pool
+    pool.delay_count[row] = 5
+    pool.eoc_countdown[row] = 2
+    pool.generation_done[row] = True
+    pool.last_codes[row] = torch.tensor([8, 9, 10])
+    pool.seeds[row] = 17
+    pool.step_count[row] = 5
+    model.output_codes["request"] = [torch.tensor([8, 9, 10])]
 
-    # Seeded request on the same row: the masked public seed lands.
-    model.set_request_seed("request", 42)
-    assert model.sampler_pool.seeds[0].item() == 42
+    model.reset_request("request")
+    model.reset_request("request")
+    assert model.rid_to_row == {}
+    assert model.free_rows == [row]
+    assert model.output_codes == {}
+
+    model.set_request_seed("request", 23)
+    assert model.rid_to_row == {"request": row}
+    assert model.free_rows == []
+    assert int(pool.delay_count[row].item()) == 0
+    assert int(pool.eoc_countdown[row].item()) == -1
+    assert not bool(pool.generation_done[row])
+    assert pool.last_codes[row].tolist() == [0, 0, 0]
+    assert int(pool.seeds[row].item()) == 23
+    assert int(pool.step_count[row].item()) == 0
+    assert "request" not in model.output_codes
 
 
 def test_higgs_prefill_embeddings_attach_private_sidecar() -> None:
@@ -1741,6 +1768,164 @@ def higgs_stream_item(
             "codebook_size": codebook_size,
         },
     )
+
+
+def test_higgs_streaming_vocoder_abort_drops_buffered_rows_before_decode() -> None:
+    raw_codes = torch.arange(1, 13, dtype=torch.long).reshape(4, 3)
+    delayed = apply_delay_pattern(raw_codes)
+    codec = FakeHiggsStreamingCodec()
+    scheduler = HiggsStreamingVocoderScheduler(
+        codec,
+        stream_stride=10,
+        stream_followup_stride=2,
+        initial_chunk_frames=0,
+        stream_overlap_tokens=0,
+        stream_holdback_tokens=0,
+    )
+    payload = higgs_stream_payload(
+        "req",
+        stream=True,
+        delayed_rows=delayed.tolist(),
+        codebook_size=64,
+    )
+
+    scheduler.handle_streaming_new_request("req", payload)
+    for row in delayed[:5]:
+        scheduler.handle_stream_chunk("req", higgs_stream_item(row, codebook_size=64))
+
+    assert len(scheduler.stream_states["req"].delayed_rows) == 5
+    assert codec.decode_inputs == []
+    assert drain_higgs_outbox(scheduler) == []
+
+    scheduler.abort("req")
+    scheduler.abort("req")
+
+    assert scheduler.stream_payloads == {}
+    assert scheduler.stream_states == {}
+    assert scheduler.pending_done == set()
+    scheduler.handle_stream_chunk(
+        "req",
+        higgs_stream_item(delayed[5], codebook_size=64),
+    )
+    assert scheduler.stream_states == {}
+    assert codec.decode_inputs == []
+    assert drain_higgs_outbox(scheduler) == []
+
+
+def test_higgs_streaming_vocoder_abort_before_payload_drops_late_chunk_on_reuse() -> (
+    None
+):
+    raw_codes = torch.arange(1, 19, dtype=torch.long).reshape(6, 3)
+    delayed = apply_delay_pattern(raw_codes)
+    scheduler = HiggsStreamingVocoderScheduler(
+        FakeUnevenHiggsStreamingCodec(),
+        stream_stride=3,
+        stream_followup_stride=2,
+        stream_overlap_tokens=1,
+        stream_holdback_tokens=0,
+    )
+
+    scheduler.abort("req")
+    scheduler.handle_stream_chunk(
+        "req",
+        higgs_stream_item(torch.tensor([17, 18, 19]), codebook_size=64),
+    )
+    assert scheduler.stream_states == {}
+    assert scheduler.stream_payloads == {}
+    assert drain_higgs_outbox(scheduler) == []
+
+    payload = higgs_stream_payload(
+        "req",
+        stream=True,
+        delayed_rows=delayed.tolist(),
+        codebook_size=64,
+    )
+    expected = scheduler.decode_state_to_audio(HiggsTtsState.from_dict(payload.data))
+    assert expected is not None
+
+    scheduler.handle_streaming_new_request("req", payload)
+    assert not scheduler.is_aborted("req")
+    for row in delayed:
+        scheduler.handle_stream_chunk("req", higgs_stream_item(row, codebook_size=64))
+    scheduler.handle_stream_done("req")
+
+    messages = drain_higgs_outbox(scheduler)
+    stream_chunks = [
+        np.frombuffer(msg.data["audio_waveform"], dtype=np.float32).copy()
+        for msg in messages
+        if msg.type == "stream"
+    ]
+    np.testing.assert_array_equal(np.concatenate(stream_chunks), expected.numpy())
+    assert [msg.type for msg in messages].count("result") == 1
+    assert scheduler.stream_states == {}
+    assert scheduler.stream_payloads == {}
+
+
+def test_higgs_streaming_vocoder_duplicate_done_does_not_finish_reused_id() -> None:
+    raw_codes = torch.arange(1, 19, dtype=torch.long).reshape(6, 3)
+    delayed = apply_delay_pattern(raw_codes)
+    scheduler = HiggsStreamingVocoderScheduler(
+        FakeUnevenHiggsStreamingCodec(),
+        stream_stride=3,
+        stream_followup_stride=2,
+        stream_overlap_tokens=1,
+        stream_holdback_tokens=0,
+    )
+    first_payload = higgs_stream_payload(
+        "req",
+        stream=True,
+        delayed_rows=delayed.tolist(),
+        codebook_size=64,
+    )
+
+    scheduler.handle_streaming_new_request("req", first_payload)
+    for row in delayed:
+        scheduler.handle_stream_chunk("req", higgs_stream_item(row, codebook_size=64))
+    scheduler.handle_stream_done("req")
+    messages = drain_higgs_outbox(scheduler)
+    assert [msg.type for msg in messages].count("result") == 1
+    assert scheduler.stream_states == {}
+    assert scheduler.stream_payloads == {}
+    assert "req" in scheduler.completed_stream_request_ids
+
+    scheduler.handle_stream_done("req")
+    second_raw_codes = torch.full((6, 3), 30, dtype=torch.long)
+    second_delayed = apply_delay_pattern(second_raw_codes)
+    second_payload = higgs_stream_payload(
+        "req",
+        stream=True,
+        delayed_rows=second_delayed.tolist(),
+        codebook_size=64,
+    )
+    expected_second = scheduler.decode_state_to_audio(
+        HiggsTtsState.from_dict(second_payload.data)
+    )
+    assert expected_second is not None
+
+    scheduler.handle_streaming_new_request("req", second_payload)
+
+    assert scheduler.stream_payloads.get("req") is second_payload
+    assert "req" in scheduler.stream_states
+    assert "req" not in scheduler.pending_done
+    assert drain_higgs_outbox(scheduler) == []
+
+    for row in second_delayed:
+        scheduler.handle_stream_chunk("req", higgs_stream_item(row, codebook_size=64))
+    scheduler.handle_stream_done("req")
+
+    second_messages = drain_higgs_outbox(scheduler)
+    second_stream_chunks = [
+        np.frombuffer(msg.data["audio_waveform"], dtype=np.float32).copy()
+        for msg in second_messages
+        if msg.type == "stream"
+    ]
+    np.testing.assert_array_equal(
+        np.concatenate(second_stream_chunks),
+        expected_second.numpy(),
+    )
+    assert [msg.type for msg in second_messages].count("result") == 1
+    assert scheduler.stream_states == {}
+    assert scheduler.stream_payloads == {}
 
 
 def test_higgs_streaming_vocoder_emits_compact_chunks_and_slim_final() -> None:

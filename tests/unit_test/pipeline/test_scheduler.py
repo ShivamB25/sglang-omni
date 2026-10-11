@@ -30,6 +30,8 @@ from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.runtime_context import get_context
 
 from sglang_omni.admission import QueueFullError
+from sglang_omni.models.higgs_tts.model import HiggsTTSModel
+from sglang_omni.models.higgs_tts.sampler import HiggsBatchedSamplerState
 from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.scheduling import omni_scheduler as omni_scheduler_module
 from sglang_omni.scheduling.message import IncomingMessage
@@ -1231,9 +1233,9 @@ def test_omni_scheduler_abort_propagates_immediate_kv_cleanup_failure(
     assert req.finished_reason.to_json()["type"] == "abort"
 
 
-def test_omni_scheduler_abort_marks_running_request_for_finish(monkeypatch) -> None:
-    """Running aborts follow upstream SGLang's deferred KV cleanup path."""
-    cleaned: list[str] = []
+def test_omni_scheduler_abort_defers_higgs_row_release_until_step_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     release_calls: list[str] = []
     monkeypatch.setattr(
         omni_scheduler_module,
@@ -1246,8 +1248,27 @@ def test_omni_scheduler_abort_marks_running_request_for_finish(monkeypatch) -> N
         "_emit_model_path_end",
         lambda rid, *, status: model_path_ends.append((rid, status)),
     )
+    model = object.__new__(HiggsTTSModel)
+    model.rid_to_row = {}
+    model.free_rows = [0]
+    model.output_codes = {}
+    model.sampler_pool = HiggsBatchedSamplerState(
+        max_batch_size=1,
+        num_codebooks=3,
+        device="cpu",
+    )
+    model.set_request_seed("req-run", 41)
+    row = model.rid_to_row["req-run"]
+    model.sampler_pool.delay_count[row] = 3
+    model.sampler_pool.eoc_countdown[row] = 1
+    model.sampler_pool.generation_done[row] = True
+    model.sampler_pool.last_codes[row] = torch.tensor([8, 9, 10])
+    model.sampler_pool.step_count[row] = 3
+    first_output_codes = torch.tensor([8, 9, 10])
+    model.output_codes["req-run"] = [first_output_codes]
+
     scheduler = object.__new__(OmniScheduler)
-    scheduler.abort_callback = cleaned.append
+    scheduler.abort_callback = model.reset_request
     scheduler.request_finished_callback = None
     scheduler.aborted_request_ids = set()
     scheduler.aborted_request_id_order = deque()
@@ -1260,15 +1281,12 @@ def test_omni_scheduler_abort_marks_running_request_for_finish(monkeypatch) -> N
     scheduler.prefill_end_done = set()
     scheduler.inbox = Queue()
     scheduler.waiting_queue = []
+    scheduler.tree_cache = SimpleNamespace()
 
-    req = SimpleNamespace(
-        rid="req-run",
-        to_finish=None,
-        finished_reason=None,
+    req = make_abortable_req(
+        "req-run",
         kv=ReqKvInfo(req_pool_idx=1),
-        is_retracted=False,
-        finished=lambda: False,
-        _omni_terminal_claimed=False,
+        omni_data=SimpleNamespace(),
     )
     batch = SimpleNamespace(reqs=[req], batch_is_full=True)
     scheduler.running_batch = batch
@@ -1277,25 +1295,45 @@ def test_omni_scheduler_abort_marks_running_request_for_finish(monkeypatch) -> N
     init_sync_request_build_state(scheduler)
 
     scheduler.abort("req-run")
+    scheduler.abort("req-run")
 
     assert req in batch.reqs
     assert req.to_finish.to_json()["type"] == "abort"
-    assert cleaned == []
+    assert model.rid_to_row == {"req-run": row}
+    assert model.free_rows == []
+    assert model.output_codes["req-run"][0] is first_output_codes
     assert release_calls == []
     assert scheduler.aborted_request_ids == {"req-run"}
     assert scheduler.pending_stream_ingress == {}
     assert scheduler.deferred_request_payloads == {}
     assert scheduler.dirty_deferred_request_ids == set()
     assert scheduler.first_emit_done == set()
-    # The model-path interval closes at abort time rather than waiting for
-    # stream_output, which a running abort is not guaranteed to reach.
     assert scheduler.prefill_start_done == set()
     assert model_path_ends == [("req-run", "aborted")]
-    req.finished = lambda: True
+
+    req.update_finish_state()
     scheduler.stream_output([req])
-    assert cleaned == ["req-run"]
-    assert scheduler.prefill_start_done == set()
+
+    assert model.rid_to_row == {}
+    assert model.free_rows == [row]
+    assert model.output_codes == {}
+    assert release_calls == []
+    assert req.omni_data is None
     assert model_path_ends == [("req-run", "aborted")]
+
+    scheduler.abort("req-run")
+    assert release_calls == ["req-run"]
+    assert model.free_rows == [row]
+    model.set_request_seed("req-run", 73)
+    assert model.rid_to_row == {"req-run": row}
+    assert model.free_rows == []
+    assert int(model.sampler_pool.delay_count[row].item()) == 0
+    assert int(model.sampler_pool.eoc_countdown[row].item()) == -1
+    assert not bool(model.sampler_pool.generation_done[row])
+    assert model.sampler_pool.last_codes[row].tolist() == [0, 0, 0]
+    assert int(model.sampler_pool.seeds[row].item()) == 73
+    assert int(model.sampler_pool.step_count[row].item()) == 0
+    assert model.output_codes == {}
 
 
 def test_omni_scheduler_abort_cleans_queued_request_immediately(monkeypatch) -> None:
