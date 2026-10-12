@@ -389,6 +389,11 @@ Relevant model CI ownership:
   stdout; details in `/tmp/wer_ci_qwen3.log` and `/tmp/wer_ci_tts.log`).
 - GPU handoff between stages: `.github/scripts/delete_gpu_process.sh --kill-orphans` (kills orphan
   spawn/router workers, waits for VRAM below threshold).
+  In containers where NVML reports host-namespace PIDs, stop owned process groups
+  first, then use `--wait-only`. That mode never sends signals, even when
+  `--kill-orphans` is also supplied. It still requires valid GPU memory queries;
+  unavailable, invalid, or unreleased memory fails the handoff rather than
+  silently passing.
 - `qwen3_omni_vision_sglang_env`: session-scoped SGLang dist + DP-attention
   init from `conftest.py`, shared by every Qwen3-Omni vision-encoder benchmark
   module — avoids re-initializing the process-global TP group when the combined
