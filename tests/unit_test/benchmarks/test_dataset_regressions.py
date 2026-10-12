@@ -129,6 +129,32 @@ def test_load_seedtts_samples_accepts_local_meta_lst(tmp_path: Path) -> None:
     assert samples[0].target_text == "target one"
 
 
+@pytest.mark.parametrize(
+    "target_text",
+    ["<|emotion:elation|>Hello!", "Read the literal separator A | B aloud."],
+    ids=["control_tokens", "literal_pipe"],
+)
+def test_local_meta_lst_preserves_target_pipes(
+    tmp_path: Path, target_text: str
+) -> None:
+    reference_path = tmp_path / "ref.wav"
+    reference_path.write_bytes(b"wav")
+    metadata_path = tmp_path / "meta.lst"
+    metadata_path.write_text(
+        f"\nmalformed\nsample-1|hello|ref.wav|{target_text}\n"
+        "sample-2|world|ref.wav|not selected\n",
+        encoding="utf-8",
+    )
+
+    samples = seedtts.load_seedtts_samples(str(metadata_path), max_samples=1)
+
+    assert [(sample.sample_id, sample.target_text) for sample in samples] == [
+        ("sample-1", target_text)
+    ]
+    assert samples[0].ref_text == "hello"
+    assert samples[0].ref_audio == str(reference_path)
+
+
 def test_local_seedtts_source_does_not_claim_huggingface_revision(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
