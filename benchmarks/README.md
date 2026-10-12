@@ -187,6 +187,11 @@ python -m benchmarks.eval.benchmark_omni_seedtts \
     --similarity-only --output-dir results/qwen3_omni_en --device cuda:0
 ```
 
+TTS `--stream` requests raw PCM with `stream_format="audio"` rather than a backend's
+default SSE transport. Audio duration uses either SGLang's `X-Sample-Rate` /
+`X-Channels` headers or model-native `X-Audio-Sample-Rate` / `X-Audio-Channels`.
+SGLang header values take precedence when both formats are present.
+
 ## Eval Scripts
 
 | Script | Task | Model | API |
