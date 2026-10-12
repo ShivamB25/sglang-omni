@@ -310,6 +310,42 @@ async def test_slow_outcomes_do_not_occupy_generation_connections() -> None:
             await server.cleanup()
 
 
+@pytest.mark.asyncio
+async def test_raw_stream_selects_audio_and_uses_model_native_format() -> None:
+    async def speech(request: web.Request) -> web.Response:
+        payload = await request.json()
+        if payload.get("stream_format") != "audio":
+            return web.Response(body=b"data: {}\n\n", content_type="text/event-stream")
+        else:
+            return web.Response(
+                body=bytes(16000 * 2 * 2),
+                content_type="audio/pcm",
+                headers={"X-Audio-Sample-Rate": "16000", "X-Audio-Channels": "2"},
+            )
+
+    application = web.Application()
+    application.router.add_post("/v1/audio/speech", speech)
+    server = web.AppRunner(application)
+    await server.setup()
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.setblocking(False)
+        api_url = f"http://127.0.0.1:{listener.getsockname()[1]}/v1/audio/speech"
+        await web.SockSite(server, listener).start()
+        try:
+            runner = BenchmarkRunner(
+                RunConfig(max_concurrency=1, warmup=0, disable_tqdm=True)
+            )
+            results = await runner.run(
+                [SEEDTTS_SAMPLE],
+                make_tts_send_fn("tts", api_url, stream=True, no_ref_audio=True),
+            )
+            assert results[0].is_success, results[0].error
+            assert results[0].audio_duration_s == pytest.approx(1.0)
+        finally:
+            await server.cleanup()
+
+
 def test_wer_fanout_preserves_all_twenty_samples_at_long_audio_admission_cap(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
