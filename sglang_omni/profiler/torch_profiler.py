@@ -6,7 +6,12 @@ import subprocess
 import threading
 from contextlib import nullcontext
 
-from torch.profiler import ProfilerActivity, profile, supported_activities
+from torch.profiler import (
+    ProfilerActivity,
+    _ExperimentalConfig,
+    profile,
+    supported_activities,
+)
 
 from sglang_omni.platforms import current_platform
 
@@ -51,6 +56,7 @@ class TorchProfiler(ProfilerBase):
         Start the profiler with the given trace path template.
         """
         with cls.lock:
+            rank = cls.get_rank()
             if cls.profiler is not None:
                 if run_id is not None and cls.active_run_id == run_id:
                     return f"{cls.trace_template}_rank{rank}.trace.json.gz"
@@ -73,7 +79,6 @@ class TorchProfiler(ProfilerBase):
                 cls.trace_template = ""
             else:
                 pass
-            rank = cls.get_rank()
             trace_path_template = os.path.abspath(trace_path_template)
             cls.trace_template = trace_path_template
             cls.active_run_id = run_id
@@ -110,6 +115,10 @@ class TorchProfiler(ProfilerBase):
                 == "1",
                 with_stack=os.environ.get("SGLANG_TORCH_PROFILER_WITH_STACK") == "1",
                 with_flops=os.environ.get("SGLANG_TORCH_PROFILER_WITH_FLOPS") == "1",
+                experimental_config=_ExperimentalConfig(
+                    profile_all_threads=True,
+                    verbose=os.environ.get("SGLANG_TORCH_PROFILER_WITH_STACK") == "1",
+                ),
             )
             cls.profiler.start()
             return f"{trace_path_template}_rank{rank}.trace.json.gz"

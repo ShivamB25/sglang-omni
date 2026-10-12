@@ -18,6 +18,15 @@ and are controlled by the same HTTP surface:
 Most diagnostics use the event recorder. The torch profiler is opt-in for
 deeper kernel investigation.
 
+Torch capture includes CPU operators from existing worker threads, not just the
+thread handling the profiling request. This requires the pinned PyTorch runtime's
+`profile_all_threads` experimental option. With
+`SGLANG_TORCH_PROFILER_WITH_STACK=1`, verbose trace export retains their source
+stacks. These options apply only while profiling is active; measure serving
+latency and throughput separately with profiling disabled.
+Starting the same active `run_id` again returns its original trace path without
+discarding already recorded operations.
+
 ## Event model
 
 Every instrumentation point appends a single line of JSON to a per-process
