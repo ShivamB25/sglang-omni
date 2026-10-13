@@ -178,6 +178,8 @@ For regular streaming windows, the vocoder also decodes codec frames held back
 from emission as right context for the current window. Those samples remain
 withheld until a later streaming update; the final stream-done drain emits the
 remaining audio.
+Codecs without an explicit hop length retain the full decoded remainder when no
+frames are withheld, so inferred frame sizing does not discard their final samples.
 
 1. Use curl
 

@@ -265,7 +265,9 @@ class HiggsStreamingVocoderScheduler(StreamingVocoderBase[HiggsStreamState, None
         )
         trim_frames = state.emitted_raw_frames - window_start_raw
         trim_samples = min(int(trim_frames * samples_per_frame), int(audio.shape[-1]))
-        if not is_final:
+        if not is_final and (
+            self.samples_per_frame is not None or emit_until_raw < decode_until_raw
+        ):
             new_frames = emit_until_raw - state.emitted_raw_frames
             emit_samples = int(new_frames * samples_per_frame)
             delta = audio[trim_samples : trim_samples + emit_samples].contiguous()
