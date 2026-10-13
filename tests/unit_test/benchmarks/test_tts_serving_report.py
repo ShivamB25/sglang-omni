@@ -1,7 +1,11 @@
 import pytest
 
 from benchmarks.tts_serving.metrics import ScenarioResult
-from benchmarks.tts_serving.report import summarize_output_throughput
+from benchmarks.tts_serving.report import (
+    build_results_report,
+    summarize_output_throughput,
+)
+from benchmarks.tts_serving.spec import BenchmarkSpec
 
 
 def scenario_result(
@@ -102,8 +106,13 @@ def test_output_throughput_is_null_without_valid_window_or_token_samples() -> No
             )
         ]
     )
-    assert nonpositive_window["observation_wall_time_s"] is None
-    assert nonpositive_window["audio_throughput_s_per_s"] is None
+    assert nonpositive_window == {
+        "observation_wall_time_s": None,
+        "audio_throughput_s_per_s": None,
+        "completion_tokens_per_s": None,
+        "audio_duration_sample_count": 1,
+        "completion_token_sample_count": 1,
+    }
 
     missing_tokens = summarize_output_throughput(
         [
@@ -153,21 +162,7 @@ def test_output_throughput_counts_only_successful_non_cancelled_audio() -> None:
     assert summary["completion_token_sample_count"] == 1
 
 
-def test_output_throughput_handles_zero_timestamps_no_audio_and_all_failures() -> None:
-    zero_timestamp = summarize_output_throughput(
-        [
-            scenario_result(
-                "zero",
-                actual_start_s=0.0,
-                completed_s=4.0,
-                audio_duration_s=2.0,
-                completion_tokens=3,
-            )
-        ]
-    )
-    assert zero_timestamp["observation_wall_time_s"] == 4.0
-    assert zero_timestamp["audio_throughput_s_per_s"] == 0.5
-
+def test_output_throughput_distinguishes_censored_audio_from_all_failures() -> None:
     no_audio = summarize_output_throughput(
         [
             scenario_result(
@@ -175,8 +170,13 @@ def test_output_throughput_handles_zero_timestamps_no_audio_and_all_failures() -
             )
         ]
     )
-    assert no_audio["audio_throughput_s_per_s"] == 0.0
-    assert no_audio["audio_duration_sample_count"] == 0
+    assert no_audio == {
+        "observation_wall_time_s": 4.0,
+        "audio_throughput_s_per_s": None,
+        "completion_tokens_per_s": 0.75,
+        "audio_duration_sample_count": 0,
+        "completion_token_sample_count": 1,
+    }
 
     all_failed = summarize_output_throughput(
         [
@@ -250,3 +250,109 @@ def test_partial_token_usage_does_not_estimate_unreported_output() -> None:
     assert summary["completion_tokens_per_s"] == 5.0
     assert summary["audio_duration_sample_count"] == 2
     assert summary["completion_token_sample_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("audio_duration_s", "audio_throughput_s_per_s", "audio_duration_sample_count"),
+    [
+        (0.0, None, 1),
+        (-3.0, None, 1),
+        (float("nan"), None, 1),
+        (float("inf"), None, 1),
+        (4.0, 2.0, 2),
+    ],
+)
+def test_report_does_not_treat_censored_successful_audio_as_complete_output(
+    audio_duration_s: float,
+    audio_throughput_s_per_s: float | None,
+    audio_duration_sample_count: int,
+) -> None:
+    report = build_results_report(
+        BenchmarkSpec(base_url="http://127.0.0.1:1", model_name="report-test"),
+        [
+            scenario_result(
+                "observed",
+                actual_start_s=0.0,
+                completed_s=2.0,
+                audio_duration_s=4.0,
+                completion_tokens=8,
+            ),
+            scenario_result(
+                "possibly-censored",
+                actual_start_s=1.0,
+                completed_s=4.0,
+                audio_duration_s=audio_duration_s,
+                completion_tokens=12,
+            ),
+        ],
+    )
+    expected = {
+        "observation_wall_time_s": 4.0,
+        "audio_throughput_s_per_s": audio_throughput_s_per_s,
+        "completion_tokens_per_s": 5.0,
+        "audio_duration_sample_count": audio_duration_sample_count,
+        "completion_token_sample_count": 2,
+    }
+
+    assert report["metrics"]["output_throughput"] == expected
+    assert report["metrics"]["by_stage"]["stage-1"]["output_throughput"] == expected
+    assert report["metrics"]["by_endpoint"]["speech"]["output_throughput"] == expected
+
+
+def test_report_observes_gaps_between_stages_without_scaling_output_by_counts() -> None:
+    report = build_results_report(
+        BenchmarkSpec(base_url="http://127.0.0.1:1", model_name="report-test"),
+        [
+            ScenarioResult(
+                scenario_id="batch",
+                endpoint="batch",
+                category="traffic",
+                stage_id="stage-a",
+                success=True,
+                status="ok",
+                actual_start_s=1000000.0,
+                completed_s=1000002.0,
+                audio_duration_s=8.0,
+                completion_tokens=0,
+                batch_size=4,
+                load_concurrency=4,
+                audio_bytes=384000,
+            ),
+            ScenarioResult(
+                scenario_id="later-speech",
+                endpoint="speech",
+                category="traffic",
+                stage_id="stage-b",
+                success=True,
+                status="ok",
+                actual_start_s=1000010.0,
+                completed_s=1000012.0,
+                audio_duration_s=4.0,
+                completion_tokens=24,
+                load_concurrency=1,
+                audio_bytes=999999999,
+            ),
+        ],
+    )
+
+    assert report["metrics"]["output_throughput"] == {
+        "observation_wall_time_s": 12.0,
+        "audio_throughput_s_per_s": 1.0,
+        "completion_tokens_per_s": 2.0,
+        "audio_duration_sample_count": 2,
+        "completion_token_sample_count": 2,
+    }
+    assert report["metrics"]["by_stage"]["stage-a"]["output_throughput"] == {
+        "observation_wall_time_s": 2.0,
+        "audio_throughput_s_per_s": 4.0,
+        "completion_tokens_per_s": 0.0,
+        "audio_duration_sample_count": 1,
+        "completion_token_sample_count": 1,
+    }
+    assert report["metrics"]["by_stage"]["stage-b"]["output_throughput"] == {
+        "observation_wall_time_s": 2.0,
+        "audio_throughput_s_per_s": 2.0,
+        "completion_tokens_per_s": 12.0,
+        "audio_duration_sample_count": 1,
+        "completion_token_sample_count": 1,
+    }

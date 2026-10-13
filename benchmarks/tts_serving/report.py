@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections import Counter, defaultdict
 from typing import Any, TypedDict
@@ -80,7 +81,7 @@ def summarize_output_throughput(
     audio_durations = [
         result.audio_duration_s
         for result in successful_results
-        if result.audio_duration_s > 0
+        if result.audio_duration_s > 0 and math.isfinite(result.audio_duration_s)
     ]
     completion_token_values = [
         result.completion_tokens
@@ -92,6 +93,7 @@ def summarize_output_throughput(
         "audio_throughput_s_per_s": (
             sum(audio_durations) / observation_wall_time_s
             if observation_wall_time_s is not None
+            and len(audio_durations) == len(successful_results)
             else None
         ),
         "completion_tokens_per_s": (

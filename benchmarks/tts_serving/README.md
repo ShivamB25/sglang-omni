@@ -312,15 +312,20 @@ logs/harness.log      # load-stage execution notes
 Report schema 5 adds `output_throughput`. Its observation window runs from the
 earliest actual request start to the latest completion, including failures and
 cancellations but excluding capability probes. Only successful, non-cancelled
-generation contributes output. Audio requires a positive validated duration;
+generation contributes output. Audio requires a positive, finite validated duration;
 completion tokens require reported usage and are not inferred from audio length.
 The two sample counts identify numerator coverage. Every non-probe traffic result
 must have both actual start and completion times to establish the denominator;
-partial or nonpositive observation windows produce null rates. With no reported
-token usage, the token rate is null. Partial token/audio coverage measures only
-the observed numerator, not estimated total output; inspect the sample counts.
-An observed all-failed run has zero successful-audio throughput.
+partial or nonpositive observation windows produce null rates. The global window
+includes gaps between stages. Each grouped summary observes only its own traffic.
 
-Existing `wall_time_s` and `achieved_rps` retain their successful-request-window
-semantics. Do not substitute them for the all-traffic denominator or compare
-their rates as though they measure the same population.
+If any successful generation lacks a valid audio duration, audio throughput is
+null rather than a partial rate or zero. The audio sample count still identifies
+the durations observed. An observed all-failed run has zero successful-audio
+throughput. With no reported token usage, the token rate is null. Partial token
+coverage measures only reported tokens, not estimated total output; inspect the
+token sample count. These rates do not establish serving capacity or audio quality.
+
+Existing grouped `wall_time_s` uses the group's records, including capability
+probes. `achieved_rps` uses a successful-request window. Both fields retain their
+previous timestamp rules and are not substitutes for the all-traffic denominator.
