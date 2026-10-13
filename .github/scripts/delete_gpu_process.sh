@@ -35,7 +35,7 @@ selected_gpu_ids() {
     if [ "${target_gpu_ids}" = "all" ] \
         || [ "${OMNI_CI_ALLOW_UNSCOPED_GPU_CLEAN:-}" = "1" ] \
         || [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-        nvidia-smi --query-gpu=index --format=csv,noheader,nounits
+        nvidia-smi --query-gpu=index --format=csv,noheader,nounits || return 1
         return 0
     fi
     echo "::error::delete_gpu_process.sh refuses unscoped cleanup. Set CUDA_VISIBLE_DEVICES to the physical GPU ids owned by this job (e.g. 0,1), or OMNI_CI_ALLOW_UNSCOPED_GPU_CLEAN=1 for single-tenant CI." >&2
@@ -143,13 +143,15 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
 fi
 
 # Resolve and validate scope up front (also used by the wait loop).
-if ! mapfile -t _SELECTED_GPUS < <(selected_gpu_ids); then
+if ! selected_gpu_output=$(selected_gpu_ids); then
+    echo "::error::Unable to select GPUs for cleanup." >&2
     exit 2
 fi
-if [ "${#_SELECTED_GPUS[@]}" -eq 0 ]; then
+if [ -z "${selected_gpu_output}" ]; then
     echo "::error::no GPUs selected for cleanup"
     exit 2
 fi
+mapfile -t _SELECTED_GPUS <<< "${selected_gpu_output}"
 echo "=== GPU cleanup scope (physical): ${_SELECTED_GPUS[*]} (input CVD='${_raw_cvd}') ==="
 
 if [ "${kill_orphans}" = "1" ] && [ "${wait_only}" != "1" ]; then
@@ -197,7 +199,7 @@ while true; do
     for gpu_index in "${_SELECTED_GPUS[@]}"; do
         gpu_index=$(printf '%s' "$gpu_index" | ${_TR} -d ' ')
         [ -n "${gpu_index}" ] || continue
-        if ! used_mb=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits --id="${gpu_index}" | head -n 1 | ${_TR} -d ' '); then
+        if ! used_mb=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits --id="${gpu_index}" | ${_TR} -d ' '); then
             echo "::error::Unable to query memory for GPU ${gpu_index}." >&2
             exit 2
         fi
