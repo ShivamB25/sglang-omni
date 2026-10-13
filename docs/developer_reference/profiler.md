@@ -18,14 +18,33 @@ and are controlled by the same HTTP surface:
 Most diagnostics use the event recorder. The torch profiler is opt-in for
 deeper kernel investigation.
 
-Torch capture includes CPU operators from existing worker threads, not just the
-thread handling the profiling request. This requires the pinned PyTorch runtime's
+With memory profiling disabled, as it is by default, `TorchProfiler` captures CPU
+operators from existing threads in the same process, not just the thread handling
+the profiling request. It uses the pinned PyTorch 2.13 runtime's
 `profile_all_threads` experimental option. With
-`SGLANG_TORCH_PROFILER_WITH_STACK=1`, verbose trace export retains their source
-stacks. These options apply only while profiling is active; measure serving
-latency and throughput separately with profiling disabled.
-Starting the same active `run_id` again returns its original trace path without
-discarding already recorded operations.
+`SGLANG_TORCH_PROFILER_WITH_STACK=1`, verbose export retains available CPU operator
+source stacks. CPU worker coverage does not establish CUDA kernel source
+attribution or device timing.
+
+`SGLANG_TORCH_PROFILER_PROFILE_MEMORY=1` selects thread-local capture and logs a
+warning. The pinned Torch runtime drops memory allocation attribution with
+all-thread capture. Thread-local capture preserves the control thread's memory
+events but excludes pre-existing worker operators and their memory allocations.
+Disable memory profiling when worker CPU operator coverage is required.
+See the [upstream memory profiling issue](https://github.com/pytorch/pytorch/issues/192290).
+
+The project supports Python >=3.10,<3.13. The CUDA manifest pins Torch 2.13.0,
+the CPU manifest pins Torch 2.14.0, and the XPU manifest pins Torch 2.13.0+xpu.
+The experimental constructor must accept both `profile_all_threads` and
+`verbose`. [PyTorch does not guarantee backward compatibility for these options](https://docs.pytorch.org/docs/2.13/profiler.html#torch.profiler.profile).
+There is no automatic fallback for a build that rejects these keywords.
+Inherited ROCm and MUSA stacks require separate qualification.
+`TorchNPUProfiler` uses `torch_npu.profiler` and does not enable this all-thread
+option.
+
+These options apply only while profiling is active. Measure serving latency and
+throughput separately with profiling disabled. Starting the same active `run_id`
+again returns its original trace path without discarding recorded operations.
 
 ## Event model
 

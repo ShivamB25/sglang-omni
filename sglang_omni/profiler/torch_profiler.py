@@ -106,17 +106,27 @@ class TorchProfiler(ProfilerBase):
                 except Exception as e:
                     logger.warning(f"[Rank {rank}] Failed to export trace: {e}")
 
+            profile_memory = (
+                os.environ.get("SGLANG_TORCH_PROFILER_PROFILE_MEMORY") == "1"
+            )
+            if profile_memory:
+                logger.warning(
+                    f"[Rank {rank}] Memory profiling uses thread-local capture; "
+                    "existing worker operators are excluded"
+                )
+            else:
+                pass
+
             cls.profiler = profile(
                 activities=profiler_activities(),
                 on_trace_ready=trace_handler,
                 record_shapes=os.environ.get("SGLANG_TORCH_PROFILER_RECORD_SHAPES")
                 == "1",
-                profile_memory=os.environ.get("SGLANG_TORCH_PROFILER_PROFILE_MEMORY")
-                == "1",
+                profile_memory=profile_memory,
                 with_stack=os.environ.get("SGLANG_TORCH_PROFILER_WITH_STACK") == "1",
                 with_flops=os.environ.get("SGLANG_TORCH_PROFILER_WITH_FLOPS") == "1",
                 experimental_config=_ExperimentalConfig(
-                    profile_all_threads=True,
+                    profile_all_threads=not profile_memory,
                     verbose=os.environ.get("SGLANG_TORCH_PROFILER_WITH_STACK") == "1",
                 ),
             )
